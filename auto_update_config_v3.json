@@ -1,10 +1,10 @@
 {
   "category": "Websites,Infrastructure,Databases",
+  "util_file": "util_record.json",
   "git_repos": {
     "zabbix_templates": "https://github.com/pillai-vivek/zbx-templates-New.git",
     "zabbix_scripts": "https://github.com/pillai-vivek/zbx-scripts-New.git",
-    "grafana_dashboards": "https://github.com/pillai-vivek/grafana-dashboards-New.git",
-    "main": "https://github.com/pillai-vivek/Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3.git"
+    "grafana_dashboards": "https://github.com/pillai-vivek/grafana-dashboards-New.git"
   },
   "zabbix": {
     "url": "http://10.50.80.78/zabbix/api_jsonrpc.php",
