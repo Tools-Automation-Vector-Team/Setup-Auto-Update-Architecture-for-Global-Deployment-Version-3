@@ -30,7 +30,7 @@ def setup_logging():
 logger = setup_logging()
 
 # --- Load Config ---
-config_path = sys.argv[1] if len(sys.argv) > 1 else "auto_update_config_v2.json"
+config_path = sys.argv[1] if len(sys.argv) > 1 else "auto_update_config_v3.json"
 with open(config_path) as f:
     CONFIG = json.load(f)
 
