@@ -475,13 +475,27 @@ def process_incremental_changes(util_data, new_commits, auth_token):
                 }
             
             elif repo_type == 'dashboards' and filename.endswith('.json'):
-                logger.info(f"Processing changed dashboard: {filename}")
-                upload_grafana_dashboard(full_path)
                 dashboard_name = os.path.splitext(filename)[0]
+                git_hash = get_file_dashboard_hash(full_path)
+            
+                existing = util_data['grafana_dashboards'].get(dashboard_name, {})
+                dashboard_uid = existing.get('uid')
+                live_hash = get_grafana_dashboard_hash(dashboard_uid) if dashboard_uid else None
+            
+                if live_hash and live_hash == git_hash:
+                    logger.info(f"Dashboard '{dashboard_name}' unchanged — skipping upload.")
+                    continue
+            
+                logger.info(f"Uploading changed dashboard: {dashboard_name}")
+                upload_grafana_dashboard(full_path)
                 util_data['grafana_dashboards'][dashboard_name] = {
                     'category': category,
-                    'updated': datetime.now().isoformat()
+                    'updated': datetime.now().isoformat(),
+                    'hash': git_hash
                 }
+
+
+
         
         # Update last commit hash
         util_data['last_commits'][repo_type] = commit_info['current']
@@ -637,6 +651,38 @@ datasources:
         logger.error(f"[!] Failed to write provisioning file: {e}")
         return False
 
+def get_grafana_dashboard_hash(dashboard_uid):
+    """Fetch dashboard from Grafana and return a normalized hash"""
+    headers = {
+        "Authorization": f"Bearer {CONFIG['grafana']['api_key']}",
+        "Content-Type": "application/json"
+    }
+    res = requests.get(f"{CONFIG['grafana']['url']}/api/dashboards/uid/{dashboard_uid}", headers=headers)
+    if res.status_code != 200:
+        logger.warning(f"Could not fetch dashboard UID {dashboard_uid}: {res.status_code}")
+        return None
+
+    dashboard = res.json().get("dashboard")
+    if dashboard:
+        dashboard.pop("version", None)
+        dashboard.pop("id", None)
+        dashboard.pop("uid", None)
+        return hashlib.md5(json.dumps(dashboard, sort_keys=True).encode()).hexdigest()
+    return None
+
+def get_file_dashboard_hash(file_path):
+    """Get hash of dashboard JSON file (normalized)"""
+    try:
+        with open(file_path, "r") as f:
+            dashboard = json.load(f)
+        dashboard.pop("version", None)
+        dashboard.pop("id", None)
+        dashboard.pop("uid", None)
+        return hashlib.md5(json.dumps(dashboard, sort_keys=True).encode()).hexdigest()
+    except Exception as e:
+        logger.error(f"Failed to read or hash dashboard file {file_path}: {e}")
+        return None
+
 def setup_virtualenv():
     import subprocess
     venv_dir = os.path.join(CONFIG['externalscript_path'], 'venv')
@@ -648,6 +694,7 @@ def setup_virtualenv():
     if os.path.exists(requirements_file):
         subprocess.run([pip_path, "install", "-r", requirements_file], check=True)
 
+# --- Enhanced Main Execution ---
 # --- Enhanced Main Execution ---
 def main():
     logger.info("Starting Enhanced Zabbix auto-update process...")
@@ -665,64 +712,69 @@ def main():
 
     # Load or initialize utility file
     util_data = load_util_file()
-    
+
     if not util_data.get('initialized', False):
         logger.info("First run - initializing utility file...")
         util_data = initialize_util_file(auth_token)
-    
+
     # Compare and sync missing items
     util_data = compare_and_sync_missing_items(util_data, repo_dirs, auth_token)
-    
+
     # Detect and restore deleted resources
     deleted_items = detect_deleted_resources(util_data, auth_token)
     needs_grafana_restart = False
-    
-    if any(deleted_items.values()):  # If any resources were deleted
+
+    if any(deleted_items.values()):
         util_data, restored_count = restore_deleted_resources(util_data, deleted_items, repo_dirs, auth_token)
-        if deleted_items['dashboards']:  # If dashboards were restored
+        if deleted_items['dashboards']:
             needs_grafana_restart = True
-    
+
     # Check for new commits
     new_commits = check_for_new_commits(util_data, repo_dirs)
-    
+
     if new_commits:
         logger.info(f"Processing {len(new_commits)} repositories with new commits...")
         util_data = process_incremental_changes(util_data, new_commits, auth_token)
-        
-        # Handle Grafana plugins only if dashboard repo has changes
-        if 'dashboards' in new_commits:
+
+        # Restart Grafana only if dashboards were actually updated or restored
+        dashboards_updated = any(
+            repo_type == 'dashboards'
+            for repo_type in new_commits
+            if any(
+                f.endswith('.json')
+                for f in Repo(repo_dirs[repo_type]).git.diff('--name-only',
+                    f"{util_data['last_commits'].get(repo_type, '')}..{get_latest_commit_hash(repo_dirs[repo_type])}"
+                ).splitlines()
+            )
+        )
+
+        if dashboards_updated or deleted_items['dashboards']:
             plugin_file_path = os.path.join(repo_dirs['dashboards'], "grafana_plugins.txt")
             install_grafana_plugins(plugin_file_path)
-            needs_grafana_restart = True
-        
-        # Restart Grafana if needed (either from new commits or restored dashboards)
-        if needs_grafana_restart:
             logger.info("Restarting Grafana to apply changes...")
             os.system("systemctl restart grafana-server")
             time.sleep(15)
-            
-            # Ensure Zabbix data source exists
             add_zabbix_datasource_provisioned()
+
     else:
         logger.info("No new commits found - skipping incremental processing")
-        
-        # Still restart Grafana if dashboards were restored
         if needs_grafana_restart:
             logger.info("Restarting Grafana due to restored dashboards...")
             os.system("systemctl restart grafana-server")
             time.sleep(15)
             add_zabbix_datasource_provisioned()
-    
-    # Set up venv if required and scripts were updated
+
+    # Set up venv if required
     if CONFIG.get("venv_required", False) and ('scripts' in new_commits or not util_data.get('initialized', True)):
         logger.info("Setting up virtual environment...")
         setup_virtualenv()
 
-    # Update final timestamp
+    # Finalize
     util_data['last_updated'] = datetime.now().isoformat()
     save_util_file(util_data)
 
     logger.info("[✔] Enhanced auto-update process completed successfully.")
+
 
 # --- Entry Point ---
 if __name__ == "__main__":
