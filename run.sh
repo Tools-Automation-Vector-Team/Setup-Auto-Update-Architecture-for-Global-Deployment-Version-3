@@ -7,13 +7,27 @@ sudo apt update
 echo "[*] Installing Python 3, pip, and venv..."
 sudo apt install -y python3 python3-pip python3-venv
 
-echo "[*] Creating virtual environment at ./venv..."
-python3 -m venv venv
+# Create venv in /usr/lib/zabbix/externalscripts/venv (used by apt_update_v3.py)
+VENV_PATH="/usr/lib/zabbix/externalscripts/venv"
 
-echo "[*] Activating virtual environment..."
-source venv/bin/activate
+echo "[*] Creating Python virtual environment at $VENV_PATH..."
 
-# Install from requirements.txt if exists
+# Create parent directory if it doesn't exist
+sudo mkdir -p "$VENV_PATH"
+sudo chown -R $(whoami) "$VENV_PATH"
+
+# Create venv only if it doesn't already exist
+if [[ ! -f "$VENV_PATH/bin/activate" ]]; then
+    python3 -m venv "$VENV_PATH"
+    echo "[✓] Virtual environment created."
+else
+    echo "[i] Virtual environment already exists at $VENV_PATH"
+fi
+
+# Activate venv
+source "$VENV_PATH/bin/activate"
+
+# Install packages
 if [[ -f "requirements.txt" ]]; then
     echo "[*] Installing packages from requirements.txt..."
     pip install --upgrade pip
@@ -24,7 +38,7 @@ else
     pip install requests==2.31.0 GitPython==3.1.43
 fi
 
-# Set executable permissions for script and config
+# Make Python script executable
 if [[ -f "apt_update_v3.py" ]]; then
     chmod +x apt_update_v3.py
     echo "[✓] Made apt_update_v3.py executable."
@@ -35,9 +49,10 @@ else
     echo "[✗] apt_update_v3.py not found!"
 fi
 
-if [[ -f "auto_update_config_v2.json" ]]; then
-    chmod +x auto_update_config_v2.json
-    echo "[✓] Made auto_update_config_v2.json executable."
+# Optional: Make config executable (not required, but retained)
+if [[ -f "auto_update_config_v3.json" ]]; then
+    chmod +x auto_update_config_v3.json
+    echo "[✓] Made auto_update_config_v3.json executable."
 fi
 
 echo "[✔] Python environment setup complete."
