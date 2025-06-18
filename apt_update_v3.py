@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 
-import time
-import os
-import sys
-import json
-import tempfile
-import requests
-import zipfile
-import logging
-import hashlib
+import os, sys, json, time, shutil, tempfile, zipfile, logging, requests
 from git import Repo
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -16,182 +8,201 @@ from logging.handlers import RotatingFileHandler
 # --- Logging Setup ---
 LOG_DIR = "/var/log/zabbix-auto-update"
 LOG_FILE = os.path.join(LOG_DIR, "zabbix_auto_update.log")
-MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
-BACKUP_COUNT = 3
 
 class ZippingRotatingFileHandler(RotatingFileHandler):
     def doRollover(self):
         super().doRollover()
         log_filename = f"{self.baseFilename}.1"
         if os.path.exists(log_filename):
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            zip_filename = f"{log_filename}_{timestamp}.zip"
-            with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.write(log_filename, os.path.basename(log_filename))
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            zipfile.ZipFile(f"{log_filename}_{ts}.zip", 'w').write(log_filename, os.path.basename(log_filename))
             os.remove(log_filename)
 
 def setup_logging():
     os.makedirs(LOG_DIR, exist_ok=True)
     logger = logging.getLogger()
+    handler = ZippingRotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
     logger.setLevel(logging.INFO)
-    handler = ZippingRotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT)
-    formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-    handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
 
 logger = setup_logging()
 
-# Load config
-config_path = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v3.json'
+# --- Load Config ---
+config_path = sys.argv[1] if len(sys.argv) > 1 else "auto_update_config_v2.json"
 with open(config_path) as f:
     CONFIG = json.load(f)
 
 CATEGORIES = [cat.strip() for cat in CONFIG.get("category", "").split(",") if cat.strip()]
-UTIL_FILE = ".zabbix_util_cache.json"
+UTIL_FILE = CONFIG.get("util_file", "util_record.json")
 
-# Utility functions to compute file hash
-def compute_file_hash(filepath):
-    hash_func = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        while chunk := f.read(8192):
-            hash_func.update(chunk)
-    return hash_func.hexdigest()
+# --- Git Clone or Pull ---
+def clone_or_pull(repo_url, dest_dir):
+    if os.path.exists(dest_dir):
+        Repo(dest_dir).remotes.origin.pull()
+        logger.info(f"Pulled updates from {repo_url}")
+    else:
+        Repo.clone_from(repo_url, dest_dir)
+        logger.info(f"Cloned {repo_url}")
+    return dest_dir
 
-def load_util_file():
+# --- Util File Handling ---
+def load_util():
     if os.path.exists(UTIL_FILE):
-        with open(UTIL_FILE, "r") as f:
+        with open(UTIL_FILE) as f:
             return json.load(f)
-    return {}
+    return {"templates": [], "scripts": [], "dashboards": []}
 
-def save_util_file(data):
+def save_util(data):
     with open(UTIL_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 # --- Zabbix Login ---
 def zabbix_login():
     payload = {
-        "jsonrpc": "2.0",
-        "method": "user.login",
-        "params": {
-            "username": CONFIG['zabbix']['user'],
-            "password": CONFIG['zabbix']['password']
-        },
+        "jsonrpc": "2.0", "method": "user.login",
+        "params": {"username": CONFIG['zabbix']['user'], "password": CONFIG['zabbix']['password']},
         "id": 1
     }
-    res = requests.post(CONFIG['zabbix']['url'], json=payload, headers={"Content-Type": "application/json"})
-    result = res.json()
-    if 'result' in result:
-        logger.info("Zabbix login successful.")
-        return result['result']
-    else:
-        logger.error(f"Zabbix login failed: {result}")
-        sys.exit(1)
+    r = requests.post(CONFIG['zabbix']['url'], json=payload)
+    return r.json().get('result')
 
-# --- Compare Git and Util Data ---
-def compare_and_update(git_dir, util_data, key, update_func):
-    updated_hashes = {}
-    for cat in CATEGORIES:
-        subdir = os.path.join(git_dir, cat)
-        if not os.path.exists(subdir):
-            continue
-        for fname in os.listdir(subdir):
-            fpath = os.path.join(subdir, fname)
-            if not os.path.isfile(fpath):
-                continue
-            hash_val = compute_file_hash(fpath)
-            identifier = f"{cat}/{fname}"
-            if util_data.get(key, {}).get(identifier) != hash_val:
-                logger.info(f"[UPDATE] {key}: {identifier}")
-                update_func(fpath)
-            updated_hashes[identifier] = hash_val
-    return updated_hashes
-
-# --- Import Template, Script, Dashboard ---
-def import_zabbix_template_wrapper(auth_token):
-    def inner(path):
-        ext = path.split('.')[-1].lower()
-        format_map = {"xml": "xml", "json": "json", "yaml": "yaml", "yml": "yaml"}
-        if ext not in format_map:
-            logger.warning(f"Unsupported template format: {path}")
-            return
-        with open(path, 'r', encoding='utf-8') as file:
-            source = file.read()
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "configuration.import",
-            "params": {
-                "format": format_map[ext],
-                "rules": CONFIG.get("template_rules", {}),
-                "source": source
+# --- Import Template ---
+def import_template(token, path):
+    ext = os.path.splitext(path)[1].lower().strip('.')
+    format_map = {"json": "json", "xml": "xml", "yaml": "yaml", "yml": "yaml"}
+    if ext not in format_map:
+        logger.warning(f"Skipped unsupported: {path}")
+        return
+    with open(path, 'r') as f:
+        source = f.read()
+    payload = {
+        "jsonrpc": "2.0", "method": "configuration.import",
+        "params": {
+            "format": format_map[ext],
+            "rules": {
+                "templates": {"createMissing": True, "updateExisting": True},
+                "items": {"createMissing": True, "updateExisting": True},
+                "triggers": {"createMissing": True, "updateExisting": True},
+                "discoveryRules": {"createMissing": True, "updateExisting": True},
+                "graphs": {"createMissing": True, "updateExisting": True},
+                "httptests": {"createMissing": True, "updateExisting": True}
             },
-            "auth": auth_token,
-            "id": 2
-        }
-        headers = {"Content-Type": "application/json"}
-        res = requests.post(CONFIG['zabbix']['url'], json=payload, headers=headers)
-        try:
-            response_json = res.json()
-            if "error" in response_json:
-                logger.error(f"Import failed for {os.path.basename(path)}: {response_json['error']['data']}")
-            else:
-                logger.info(f"Successfully imported {os.path.basename(path)}")
-        except ValueError:
-            logger.error(f"Invalid response for {os.path.basename(path)}: {res.text}")
-    return inner
+            "source": source
+        },
+        "auth": token,
+        "id": 2
+    }
+    res = requests.post(CONFIG['zabbix']['url'], json=payload)
+    if 'error' in res.json():
+        logger.error(f"Failed import: {path}")
+    else:
+        logger.info(f"Imported template: {path}")
 
-def copy_external_script(path):
-    dst_path = os.path.join(CONFIG['externalscript_path'], os.path.basename(path))
-    os.system(f'cp {path} {dst_path}')
-    if dst_path.endswith((".sh", ".py")):
-        os.system(f'chmod +x {dst_path}')
-    logger.info(f"Script copied: {dst_path}")
+# --- Sync External Scripts ---
+def sync_external_scripts(src_dir):
+    dest = CONFIG['zabbix'].get("externalscripts_dir", "/usr/lib/zabbix/externalscripts")
+    os.makedirs(dest, exist_ok=True)
+    for file in os.listdir(src_dir):
+        src = os.path.join(src_dir, file)
+        dst = os.path.join(dest, file)
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o755)
+        logger.info(f"Copied: {file} to externalscripts")
 
-def upload_grafana_dashboard(path):
-    with open(path, 'r') as file:
-        dashboard_json = json.load(file)
-    payload = {"dashboard": dashboard_json, "overwrite": True}
+# --- Add Zabbix Datasource to Grafana ---
+def add_zabbix_datasource():
+    file_path = "/etc/grafana/provisioning/datasources/zabbix.yaml"
+    grafana_url = CONFIG['zabbix']['url'].replace("/api_jsonrpc.php", "")
+    content = f"""apiVersion: 1
+datasources:
+  - name: Zabbix
+    type: alexanderzobnin-zabbix-datasource
+    access: proxy
+    url: {grafana_url}/api_jsonrpc.php
+    isDefault: true
+    editable: true
+    jsonData:
+      username: {CONFIG['zabbix']['user']}
+      trends: true
+      alerting: true
+    secureJsonData:
+      password: {CONFIG['zabbix']['password']}"""
+    with open(file_path, 'w') as f:
+        f.write(content)
+    os.system("systemctl restart grafana-server")
+    time.sleep(10)
+    logger.info("Provisioned Grafana datasource")
+
+# --- Import Grafana Dashboards ---
+def import_dashboards(dashboard_dir):
+    url = CONFIG['grafana']['url'].rstrip('/') + '/api/dashboards/db'
     headers = {
-        "Authorization": f"Bearer {CONFIG['grafana']['api_key']}",
+        "Authorization": f"Bearer {CONFIG['grafana']['token']}",
         "Content-Type": "application/json"
     }
-    res = requests.post(f"{CONFIG['grafana']['url']}/api/dashboards/db", headers=headers, json=payload)
-    logger.info(f"Upload {os.path.basename(path)}: {res.status_code}")
+    for file in os.listdir(dashboard_dir):
+        if file.endswith('.json'):
+            with open(os.path.join(dashboard_dir, file)) as f:
+                data = json.load(f)
+            payload = {"dashboard": data, "overwrite": True, "folderId": 0}
+            r = requests.post(url, headers=headers, json=payload)
+            if r.status_code == 200:
+                logger.info(f"Imported dashboard: {file}")
+            else:
+                logger.error(f"Failed import {file}: {r.text}")
 
-# --- Git Pull with Commit Detection ---
-def clone_or_pull(repo_url, local_dir):
-    if os.path.exists(local_dir):
-        repo = Repo(local_dir)
-        commits_before = set(c.hexsha for c in repo.iter_commits('origin/main'))
-        repo.remotes.origin.pull()
-        commits_after = set(c.hexsha for c in repo.iter_commits('origin/main'))
-        new_commits = list(commits_after - commits_before)
-        return local_dir, new_commits
-    else:
-        Repo.clone_from(repo_url, local_dir)
-        return local_dir, []
-
-# --- Main Execution ---
+# --- Main ---
 def main():
-    logger.info("Starting Zabbix auto-update process...")
-    util_data = load_util_file()
-    util_data.setdefault("templates", {})
-    util_data.setdefault("scripts", {})
-    util_data.setdefault("dashboards", {})
-
+    logger.info("Starting auto-update...")
+    util_data = load_util()
     temp_dir = tempfile.mkdtemp()
-    zbx_tpl_dir, _ = clone_or_pull(CONFIG['git_repos']['zabbix_templates'], os.path.join(temp_dir, 'zbx_tpl'))
-    zbx_scr_dir, _ = clone_or_pull(CONFIG['git_repos']['zabbix_scripts'], os.path.join(temp_dir, 'zbx_scr'))
-    graf_dir, _ = clone_or_pull(CONFIG['git_repos']['grafana_dashboards'], os.path.join(temp_dir, 'graf_dash'))
+    zbx_tpl_dir = clone_or_pull(CONFIG['git_repos']['zabbix_templates'], os.path.join(temp_dir, 'tpl'))
+    zbx_scr_dir = clone_or_pull(CONFIG['git_repos']['zabbix_scripts'], os.path.join(temp_dir, 'scr'))
+    graf_dir = clone_or_pull(CONFIG['git_repos']['grafana_dashboards'], os.path.join(temp_dir, 'dash'))
 
-    auth_token = zabbix_login()
+    token = zabbix_login()
 
-    util_data["templates"] = compare_and_update(zbx_tpl_dir, util_data, "templates", import_zabbix_template_wrapper(auth_token))
-    util_data["scripts"] = compare_and_update(zbx_scr_dir, util_data, "scripts", copy_external_script)
-    util_data["dashboards"] = compare_and_update(graf_dir, util_data, "dashboards", upload_grafana_dashboard)
+    new_templates = []
+    new_scripts = []
+    new_dashboards = []
 
-    save_util_file(util_data)
-    logger.info("[✔] Auto-update with comparison completed.")
+    for cat in CATEGORIES:
+        tpl_cat = os.path.join(zbx_tpl_dir, cat)
+        scr_cat = os.path.join(zbx_scr_dir, cat)
+        dash_cat = os.path.join(graf_dir, cat)
+
+        if os.path.exists(tpl_cat):
+            for f in os.listdir(tpl_cat):
+                rel = f"{cat}/{f}"
+                if rel not in util_data['templates']:
+                    import_template(token, os.path.join(tpl_cat, f))
+                    new_templates.append(rel)
+
+        if os.path.exists(scr_cat):
+            for f in os.listdir(scr_cat):
+                rel = f"{cat}/{f}"
+                if rel not in util_data['scripts']:
+                    sync_external_scripts(scr_cat)
+                    new_scripts.append(rel)
+
+        if os.path.exists(dash_cat):
+            for f in os.listdir(dash_cat):
+                rel = f"{cat}/{f}"
+                if rel not in util_data['dashboards']:
+                    import_dashboards(dash_cat)
+                    new_dashboards.append(rel)
+
+    if new_templates or new_scripts or new_dashboards:
+        util_data['templates'].extend(new_templates)
+        util_data['scripts'].extend(new_scripts)
+        util_data['dashboards'].extend(new_dashboards)
+        save_util(util_data)
+        logger.info("Updated util file with new entries")
+
+    add_zabbix_datasource()
+    logger.info("Auto-update completed.")
 
 if __name__ == "__main__":
     main()
