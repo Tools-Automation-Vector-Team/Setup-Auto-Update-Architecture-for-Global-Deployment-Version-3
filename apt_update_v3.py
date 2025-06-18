@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
+import time
 import os
 import sys
 import json
-import requests
 import tempfile
-import hashlib
+import requests
 import zipfile
 import logging
+import hashlib
 from git import Repo
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -15,7 +16,7 @@ from logging.handlers import RotatingFileHandler
 # --- Logging Setup ---
 LOG_DIR = "/var/log/zabbix-auto-update"
 LOG_FILE = os.path.join(LOG_DIR, "zabbix_auto_update.log")
-MAX_LOG_SIZE = 5 * 1024 * 1024
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
 BACKUP_COUNT = 3
 
 class ZippingRotatingFileHandler(RotatingFileHandler):
@@ -34,7 +35,7 @@ def setup_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     handler = ZippingRotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT)
-    formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
+    formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
@@ -42,14 +43,33 @@ def setup_logging():
 logger = setup_logging()
 
 # Load config
-CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v3.json'
-with open(CONFIG_PATH) as f:
+config_path = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v3.json'
+with open(config_path) as f:
     CONFIG = json.load(f)
 
-UTIL_PATH = CONFIG.get("util_file", "current_util_state.json")
+CATEGORIES = [cat.strip() for cat in CONFIG.get("category", "").split(",") if cat.strip()]
+UTIL_FILE = ".zabbix_util_cache.json"
 
-# --- Zabbix Authentication ---
-def zabbix_auth():
+# Utility functions to compute file hash
+def compute_file_hash(filepath):
+    hash_func = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(8192):
+            hash_func.update(chunk)
+    return hash_func.hexdigest()
+
+def load_util_file():
+    if os.path.exists(UTIL_FILE):
+        with open(UTIL_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_util_file(data):
+    with open(UTIL_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+# --- Zabbix Login ---
+def zabbix_login():
     payload = {
         "jsonrpc": "2.0",
         "method": "user.login",
@@ -60,123 +80,118 @@ def zabbix_auth():
         "id": 1
     }
     res = requests.post(CONFIG['zabbix']['url'], json=payload, headers={"Content-Type": "application/json"})
-    return res.json().get("result")
+    result = res.json()
+    if 'result' in result:
+        logger.info("Zabbix login successful.")
+        return result['result']
+    else:
+        logger.error(f"Zabbix login failed: {result}")
+        sys.exit(1)
 
-# --- Get existing Zabbix templates ---
-def fetch_existing_templates(auth_token):
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "template.get",
-        "params": {"output": ["host"]},
-        "auth": auth_token,
-        "id": 2
-    }
-    res = requests.post(CONFIG['zabbix']['url'], json=payload, headers={"Content-Type": "application/json"})
-    return set([tpl["host"] for tpl in res.json().get("result", [])])
+# --- Compare Git and Util Data ---
+def compare_and_update(git_dir, util_data, key, update_func):
+    updated_hashes = {}
+    for cat in CATEGORIES:
+        subdir = os.path.join(git_dir, cat)
+        if not os.path.exists(subdir):
+            continue
+        for fname in os.listdir(subdir):
+            fpath = os.path.join(subdir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            hash_val = compute_file_hash(fpath)
+            identifier = f"{cat}/{fname}"
+            if util_data.get(key, {}).get(identifier) != hash_val:
+                logger.info(f"[UPDATE] {key}: {identifier}")
+                update_func(fpath)
+            updated_hashes[identifier] = hash_val
+    return updated_hashes
 
-# --- Get existing external scripts ---
-def fetch_existing_scripts():
-    path = CONFIG['externalscript_path']
-    return set(os.listdir(path)) if os.path.isdir(path) else set()
-
-# --- Get existing Grafana dashboards ---
-def fetch_existing_dashboards():
-    headers = {"Authorization": f"Bearer {CONFIG['grafana']['api_key']}"}
-    res = requests.get(f"{CONFIG['grafana']['url']}/api/search?type=dash-db", headers=headers)
-    return set(d['uid'] for d in res.json())
-
-# --- Load Git state and previous commit ---
-def get_last_commit():
-    return CONFIG.get("last_commit", "")
-
-def update_last_commit(repo_path):
-    repo = Repo(repo_path)
-    last_commit = repo.head.commit.hexsha
-    CONFIG['last_commit'] = last_commit
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(CONFIG, f, indent=4)
-
-# --- Load Git files by category ---
-def load_git_files(git_dir):
-    files_by_cat = {"templates": set(), "scripts": set(), "dashboards": set()}
-    for root, _, files in os.walk(git_dir):
-        for f in files:
-            if f.endswith(('.xml', '.yaml', '.json', '.yml')):
-                files_by_cat['templates'].add(f)
-            elif f.endswith(('.py', '.sh')):
-                files_by_cat['scripts'].add(f)
-            elif f.endswith(".json") and 'dashboards' in root:
-                files_by_cat['dashboards'].add(f)
-    return files_by_cat
-
-# --- Apply missing files ---
-def apply_templates(missing, auth_token, template_dir):
-    for file in missing:
-        path = os.path.join(template_dir, file)
-        ext = file.split('.')[-1].lower()
-        fmt = "yaml" if ext in ["yaml", "yml"] else ext
-        with open(path, 'r') as f:
-            content = f.read()
+# --- Import Template, Script, Dashboard ---
+def import_zabbix_template_wrapper(auth_token):
+    def inner(path):
+        ext = path.split('.')[-1].lower()
+        format_map = {"xml": "xml", "json": "json", "yaml": "yaml", "yml": "yaml"}
+        if ext not in format_map:
+            logger.warning(f"Unsupported template format: {path}")
+            return
+        with open(path, 'r', encoding='utf-8') as file:
+            source = file.read()
         payload = {
             "jsonrpc": "2.0",
             "method": "configuration.import",
             "params": {
-                "format": fmt,
-                "rules": {"templates": {"createMissing": True, "updateExisting": True}},
-                "source": content
+                "format": format_map[ext],
+                "rules": CONFIG.get("template_rules", {}),
+                "source": source
             },
             "auth": auth_token,
-            "id": 3
+            "id": 2
         }
-        res = requests.post(CONFIG['zabbix']['url'], json=payload, headers={"Content-Type": "application/json"})
-        logger.info(f"Template {file} import: {res.status_code}")
+        headers = {"Content-Type": "application/json"}
+        res = requests.post(CONFIG['zabbix']['url'], json=payload, headers=headers)
+        try:
+            response_json = res.json()
+            if "error" in response_json:
+                logger.error(f"Import failed for {os.path.basename(path)}: {response_json['error']['data']}")
+            else:
+                logger.info(f"Successfully imported {os.path.basename(path)}")
+        except ValueError:
+            logger.error(f"Invalid response for {os.path.basename(path)}: {res.text}")
+    return inner
 
-def apply_scripts(missing, script_dir):
-    dst = CONFIG['externalscript_path']
-    for file in missing:
-        src_path = os.path.join(script_dir, file)
-        dst_path = os.path.join(dst, file)
-        os.system(f'cp "{src_path}" "{dst_path}"')
-        os.system(f'chmod +x "{dst_path}"')
-        logger.info(f"Script deployed: {file}")
+def copy_external_script(path):
+    dst_path = os.path.join(CONFIG['externalscript_path'], os.path.basename(path))
+    os.system(f'cp {path} {dst_path}')
+    if dst_path.endswith((".sh", ".py")):
+        os.system(f'chmod +x {dst_path}')
+    logger.info(f"Script copied: {dst_path}")
 
-def apply_dashboards(missing, dashboard_dir):
+def upload_grafana_dashboard(path):
+    with open(path, 'r') as file:
+        dashboard_json = json.load(file)
+    payload = {"dashboard": dashboard_json, "overwrite": True}
     headers = {
         "Authorization": f"Bearer {CONFIG['grafana']['api_key']}",
         "Content-Type": "application/json"
     }
-    for file in missing:
-        with open(os.path.join(dashboard_dir, file)) as f:
-            data = json.load(f)
-        payload = {"dashboard": data, "overwrite": True}
-        res = requests.post(f"{CONFIG['grafana']['url']}/api/dashboards/db", headers=headers, json=payload)
-        logger.info(f"Dashboard {file} upload: {res.status_code}")
+    res = requests.post(f"{CONFIG['grafana']['url']}/api/dashboards/db", headers=headers, json=payload)
+    logger.info(f"Upload {os.path.basename(path)}: {res.status_code}")
+
+# --- Git Pull with Commit Detection ---
+def clone_or_pull(repo_url, local_dir):
+    if os.path.exists(local_dir):
+        repo = Repo(local_dir)
+        commits_before = set(c.hexsha for c in repo.iter_commits('origin/main'))
+        repo.remotes.origin.pull()
+        commits_after = set(c.hexsha for c in repo.iter_commits('origin/main'))
+        new_commits = list(commits_after - commits_before)
+        return local_dir, new_commits
+    else:
+        Repo.clone_from(repo_url, local_dir)
+        return local_dir, []
 
 # --- Main Execution ---
 def main():
-    logger.info("[Start] Sync process")
-    auth_token = zabbix_auth()
-
-    live_templates = fetch_existing_templates(auth_token)
-    live_scripts = fetch_existing_scripts()
-    live_dashboards = fetch_existing_dashboards()
+    logger.info("Starting Zabbix auto-update process...")
+    util_data = load_util_file()
+    util_data.setdefault("templates", {})
+    util_data.setdefault("scripts", {})
+    util_data.setdefault("dashboards", {})
 
     temp_dir = tempfile.mkdtemp()
-    repo_dir = os.path.join(temp_dir, 'repo')
-    Repo.clone_from(CONFIG['git_repos']['main'], repo_dir)
-    git_files = load_git_files(repo_dir)
+    zbx_tpl_dir, _ = clone_or_pull(CONFIG['git_repos']['zabbix_templates'], os.path.join(temp_dir, 'zbx_tpl'))
+    zbx_scr_dir, _ = clone_or_pull(CONFIG['git_repos']['zabbix_scripts'], os.path.join(temp_dir, 'zbx_scr'))
+    graf_dir, _ = clone_or_pull(CONFIG['git_repos']['grafana_dashboards'], os.path.join(temp_dir, 'graf_dash'))
 
-    # Compare and apply only missing
-    missing_tpl = git_files['templates'] - live_templates
-    missing_scr = git_files['scripts'] - live_scripts
-    missing_dash = git_files['dashboards'] - live_dashboards
+    auth_token = zabbix_login()
 
-    apply_templates(missing_tpl, auth_token, repo_dir)
-    apply_scripts(missing_scr, repo_dir)
-    apply_dashboards(missing_dash, repo_dir)
+    util_data["templates"] = compare_and_update(zbx_tpl_dir, util_data, "templates", import_zabbix_template_wrapper(auth_token))
+    util_data["scripts"] = compare_and_update(zbx_scr_dir, util_data, "scripts", copy_external_script)
+    util_data["dashboards"] = compare_and_update(graf_dir, util_data, "dashboards", upload_grafana_dashboard)
 
-    update_last_commit(repo_dir)
-    logger.info("[✔] Sync completed successfully")
+    save_util_file(util_data)
+    logger.info("[✔] Auto-update with comparison completed.")
 
 if __name__ == "__main__":
     main()
