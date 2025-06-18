@@ -66,7 +66,7 @@ def get_latest_commit(repo_dir, sub_path):
     return None
 
 # --- Load config
-config_path = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v2.json'
+config_path = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v3.json'
 with open(config_path) as f:
     CONFIG = json.load(f)
 
