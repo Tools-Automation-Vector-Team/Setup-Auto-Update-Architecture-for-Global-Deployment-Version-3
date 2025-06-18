@@ -1,0 +1,30 @@
+{
+  "category": "Websites,Infrastructure,Databases",
+  "git_repos": {
+    "zabbix_templates": "https://github.com/pillai-vivek/zbx-templates-New.git",
+    "zabbix_scripts": "https://github.com/pillai-vivek/zbx-scripts-New.git",
+    "grafana_dashboards": "https://github.com/pillai-vivek/grafana-dashboards-New.git"
+  },
+  "zabbix": {
+    "url": "http://10.50.80.78/zabbix/api_jsonrpc.php",
+    "user": "Admin",
+    "password": "zabbix"
+  },
+  "grafana": {
+    "url": "http://10.50.80.78:3000",
+    "api_key": "glsa_WyuTj0NXrzWKeJTCBLiyU2RJ1lOHcASI_083f3aef",
+    "folder": "Auto Updates"
+  },
+  "externalscript_path": "/usr/lib/zabbix/externalscripts",
+  "log_file": "/var/log/zabbix_auto_update.log",
+  "venv_required": true,
+  "template_rules": {
+    "templates": true,
+    "items": true,
+    "triggers": true,
+    "discoveryRules": true,
+    "graphs": true,
+    "valueMaps": true,
+    "httptests": true
+  }
+}
