@@ -42,7 +42,7 @@ def setup_logging():
 logger = setup_logging()
 
 # Load config
-CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v2.json'
+CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else 'auto_update_config_v3.json'
 with open(CONFIG_PATH) as f:
     CONFIG = json.load(f)
 
