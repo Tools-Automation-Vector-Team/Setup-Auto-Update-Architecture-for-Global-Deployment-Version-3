@@ -2,9 +2,9 @@
   "category": "Websites,Infrastructure,Databases",
   "util_file": "util_record.json",
   "git_repos": {
-    "zabbix_templates": "https://github.com/pillai-vivek/zbx-templates-New.git",
-    "zabbix_scripts": "https://github.com/pillai-vivek/zbx-scripts-New.git",
-    "grafana_dashboards": "https://github.com/pillai-vivek/grafana-dashboards-New.git"
+    "zabbix_templates": "https://github.com/Tools-Automation-Vector-Team/zbx-templates-New.git",
+    "zabbix_scripts": "https://github.com/Tools-Automation-Vector-Team/zbx-scripts-New.git",
+    "grafana_dashboards": "https://github.com/Tools-Automation-Vector-Team/grafana-dashboards-New.git"
   },
   "zabbix": {
     "url": "http://34.130.188.190/zabbix/api_jsonrpc.php",
