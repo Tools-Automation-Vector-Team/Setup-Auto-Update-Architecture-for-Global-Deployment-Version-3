@@ -35,7 +35,7 @@ It is the version 3
     sudo apt install git
 # And run this Comamnd for first time 
 
-    git clone https://github.com/pillai-vivek/Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3.git && cd Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3 && chmod +x run.sh && ./run.sh
+    git clone https://github.com/Tools-Automation-Vector-Team/Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3.git && cd Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3 && chmod +x run.sh && ./run.sh
 
 # And run this Comamnd after first time
 
