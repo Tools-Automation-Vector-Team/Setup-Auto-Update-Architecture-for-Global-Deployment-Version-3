@@ -377,15 +377,15 @@ datasources:
 """
 
     # Check if file exists and content is the same
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r') as f:
-                existing_content = f.read()
-            if existing_content.strip() == file_content.strip():
-                logger.info("[+] Zabbix data source already properly configured")
-                return True
-        except Exception as e:
-            logger.warning(f"Could not read existing datasource file: {e}")
+    # if os.path.exists(file_path):
+    #     try:
+    #         with open(file_path, 'r') as f:
+    #             existing_content = f.read()
+    #         if existing_content.strip() == file_content.strip():
+    #             logger.info("[+] Zabbix data source already properly configured")
+    #             return True
+    #     except Exception as e:
+    #         logger.warning(f"Could not read existing datasource file: {e}")
 
     try:
         with open(file_path, "w") as file:
