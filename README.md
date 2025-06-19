@@ -40,3 +40,7 @@ It is the version 3
 # And run this Comamnd after first time
 
     cd "$(find / -type d -name 'Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3' 2>/dev/null | head -n 1)" && chmod +x run.sh && ./run.sh
+
+# Cronjob Command for every 6 hours
+
+    0 */6 * * * cd "$(find / -type d -name 'Setup-Auto-Update-Architecture-for-Global-Deployment-Version-3' 2>/dev/null | head -n 1)" && chmod +x run.sh && ./run.sh >/var/log/auto-update-cron.log 2>&1
