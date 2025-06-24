@@ -13,7 +13,7 @@
   },
   "grafana": {
     "url": "http://34.130.224.170:3000",
-    "api_key": "glsa_AX1AMyp8ROZbBIxrHM5337WJnYihGg9g_93dac52e",
+    "api_key": "glsa_QuHZaoF1tngEjWOnqTGxReJ8xHBSFcrG_7a745657",
     "folder": "Auto Updates"
   },
   "externalscript_path": "/usr/lib/zabbix/externalscripts",
