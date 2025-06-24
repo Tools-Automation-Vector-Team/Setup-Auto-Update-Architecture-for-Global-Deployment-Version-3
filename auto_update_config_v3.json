@@ -7,12 +7,12 @@
     "grafana_dashboards": "https://github.com/Tools-Automation-Vector-Team/grafana-dashboards-New.git"
   },
   "zabbix": {
-    "url": "http://34.130.188.190/zabbix/api_jsonrpc.php",
+    "url": "http://34.130.224.170/zabbix/api_jsonrpc.php",
     "user": "Admin",
     "password": "zabbix"
   },
   "grafana": {
-    "url": "http://34.130.188.190:3000",
+    "url": "http://34.130.224.170:3000",
     "api_key": "glsa_AX1AMyp8ROZbBIxrHM5337WJnYihGg9g_93dac52e",
     "folder": "Auto Updates"
   },
